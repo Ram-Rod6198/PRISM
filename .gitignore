@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Tooling / local environment
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+Instructions.txt
+
+# PyInstaller / portable build output
+build/
+dist/
+
+# App-generated runtime files
+video_combiner/tmp/
+portable_data/
+dist/data/
+
+# Local bundled FFmpeg binaries/builds.
+# Prefer documenting install steps or attaching binaries to GitHub Releases.
+ffmpeg-*/
+video_combiner/assets/ffmpeg/
+
+# Local media used for testing
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+
+# Keep explicit placeholder files if needed.
+!.gitkeep
