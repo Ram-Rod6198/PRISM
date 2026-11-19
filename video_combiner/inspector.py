@@ -1,4 +1,4 @@
-"""The panel that shows and edits whichever layer of the combiner is selected."""
+"""The panel that shows and edits whichever layer of a project is selected."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import tkinter as tk
 from collections.abc import Callable
 from tkinter import ttk
 
-from video_combiner.combiner.project import AUDIO_MIX, CombinerProject, Selection
+from video_combiner.project import AUDIO_MIX, Selection, Tile, TileProject
 from video_combiner.timecode import format_duration, format_timecode, parse_timecode
 
 _OnChange = Callable[[str], None]
@@ -20,7 +20,7 @@ class Inspector(ttk.LabelFrame):
     left in the field and changes nothing.
     """
 
-    def __init__(self, master: tk.Misc, project: CombinerProject, on_change: _OnChange) -> None:
+    def __init__(self, master: tk.Misc, project: TileProject, on_change: _OnChange) -> None:
         super().__init__(master, text="Inspector")
         self.columnconfigure(0, weight=1)
         self._editors = {
@@ -59,7 +59,7 @@ class _Editor(ttk.Frame):
     events that arrive after the editor has been swapped out.
     """
 
-    def __init__(self, master: tk.Misc, project: CombinerProject, on_change: _OnChange) -> None:
+    def __init__(self, master: tk.Misc, project: TileProject, on_change: _OnChange) -> None:
         super().__init__(master)
         self._project = project
         self._on_change = on_change
@@ -94,7 +94,7 @@ class _Editor(ttk.Frame):
 
 
 class _VideoEditor(_Editor):
-    def __init__(self, master: tk.Misc, project: CombinerProject, on_change: _OnChange) -> None:
+    def __init__(self, master: tk.Misc, project: TileProject, on_change: _OnChange) -> None:
         super().__init__(master, project, on_change)
         self.columnconfigure(0, weight=1)
         self._facts = {
@@ -144,10 +144,10 @@ class _VideoEditor(_Editor):
 
     def _fill(self) -> None:
         project, video = self._project, self._project.videos[self._index]
-        slot = project.slots()[self._index] if self._index < len(project.tiles) else None
+        tile = self._tile()
         self._facts["Video"].set(f"{self._index + 1} of {len(project.videos)}")
-        self._facts["Tile"].set(slot.tile.name if slot else "None (more videos than tiles; not rendered)")
-        self._facts["Tile Corner"].set(f"({slot.tile.x}, {slot.tile.y})" if slot else "-")
+        self._facts["Tile"].set(tile.name if tile else "None (not shown in any tile)")
+        self._facts["Tile Corner"].set(f"({tile.x}, {tile.y})" if tile else "-")
         self._facts["Duration"].set(format_duration(video.media.duration))
         self._facts["FPS"].set(f"{video.media.fps:.3f}".rstrip("0").rstrip("."))
         self._facts["Audio"].set("Yes" if video.media.has_audio else "No")
@@ -155,21 +155,23 @@ class _VideoEditor(_Editor):
         x, y = self._shown_position()
         self._x.set(str(x))
         self._y.set(str(y))
-        self._trim_start.set(format_timecode(video.trim_start_sec))
-        self._trim_end.set(format_timecode(video.trim_end_sec))
-        self._start_at.set(format_timecode(video.start_at_sec))
+        self._trim_start.set(_shown_time(video.trim_start_sec))
+        self._trim_end.set(_shown_time(video.trim_end_sec))
+        self._start_at.set(_shown_time(video.start_at_sec))
         self._in_mix.set(video.include_in_mix)
         self._in_mix_check.state(["!disabled"] if project.audio == AUDIO_MIX else ["disabled"])
 
+    def _tile(self) -> Tile | None:
+        """The tile the video plays in, if any."""
+        tile_index = self._project.tile_of(self._project.videos[self._index])
+        return None if tile_index is None else self._project.tiles[tile_index]
+
     def _shown_position(self) -> tuple[int, int]:
         """Where the video sits now: its own position, else its tile's corner, else the origin."""
-        video = self._project.videos[self._index]
+        video, tile = self._project.videos[self._index], self._tile()
         if video.position is not None:
             return video.position
-        if self._index < len(self._project.tiles):
-            tile = self._project.tiles[self._index]
-            return tile.x, tile.y
-        return 0, 0
+        return (tile.x, tile.y) if tile is not None else (0, 0)
 
     def _commit_position(self) -> None:
         try:
@@ -192,9 +194,15 @@ class _VideoEditor(_Editor):
         start_at = parse_timecode(self._start_at.get())
         if trim_start is None or start_at is None or (trim_end is None and self._trim_end.get().strip()):
             return
-        timing = (trim_start, trim_end, start_at)
-        if timing != (video.trim_start_sec, video.trim_end_sec, video.start_at_sec):
-            video.trim_start_sec, video.trim_end_sec, video.start_at_sec = timing
+        # Fields left as they were displayed are passed on as the exact values behind them.
+        shown = (video.trim_start_sec, video.trim_end_sec, video.start_at_sec)
+        fields = (self._trim_start, self._trim_end, self._start_at)
+        timing = tuple(
+            was if field.get() == _shown_time(was) else typed
+            for field, was, typed in zip(fields, shown, (trim_start, trim_end, start_at))
+        )
+        if timing != shown:
+            self._project.set_timing(video, *timing)
             self._on_change("Video timing updated.")
 
     def _commit_in_mix(self) -> None:
@@ -203,7 +211,7 @@ class _VideoEditor(_Editor):
 
 
 class _TileEditor(_Editor):
-    def __init__(self, master: tk.Misc, project: CombinerProject, on_change: _OnChange) -> None:
+    def __init__(self, master: tk.Misc, project: TileProject, on_change: _OnChange) -> None:
         super().__init__(master, project, on_change)
         self.columnconfigure(3, weight=1)
         self._x, self._y, self._tile_w, self._tile_h = (tk.StringVar() for _ in range(4))
@@ -221,7 +229,9 @@ class _TileEditor(_Editor):
         ttk.Label(self, text="Name").grid(row=2, column=0, padx=(0, 4), pady=(4, 2), sticky="w")
         self._entry(self, self._tile_name, self._commit).grid(row=2, column=1, columnspan=3, sticky="ew", pady=(4, 2))
         ttk.Label(self, text="Video").grid(row=3, column=0, padx=(0, 4), pady=2, sticky="w")
-        ttk.Label(self, textvariable=self._video).grid(row=3, column=1, columnspan=3, sticky="w", pady=2)
+        ttk.Label(self, textvariable=self._video, wraplength=420).grid(
+            row=3, column=1, columnspan=3, sticky="w", pady=2
+        )
         ttk.Button(self, text="Apply Tile", command=self._when_edited(self._commit)).grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
@@ -234,8 +244,9 @@ class _TileEditor(_Editor):
         for variable, value in ((self._x, tile.x), (self._y, tile.y), (self._tile_w, tile.w), (self._tile_h, tile.h)):
             variable.set(str(value))
         self._tile_name.set(tile.name)
-        videos = self._project.videos
-        self._video.set(videos[self._index].media.name if self._index < len(videos) else "None")
+        project = self._project
+        names = [video.media.name for video in project.videos if project.tile_of(video) == self._index]
+        self._video.set(", ".join(names) or "None")
 
     def _commit(self) -> None:
         try:
@@ -250,7 +261,7 @@ class _TileEditor(_Editor):
 
 
 class _TextEditor(_Editor):
-    def __init__(self, master: tk.Misc, project: CombinerProject, on_change: _OnChange) -> None:
+    def __init__(self, master: tk.Misc, project: TileProject, on_change: _OnChange) -> None:
         super().__init__(master, project, on_change)
         self.columnconfigure(1, weight=1)
         self._enabled = tk.BooleanVar()
@@ -350,3 +361,8 @@ class _TextEditor(_Editor):
                 variable.set(round(value / 257))
         finally:
             self._loading = was_loading
+
+
+def _shown_time(seconds: float | None) -> str:
+    """A time as these editors display it: a timecode to the millisecond."""
+    return format_timecode(None if seconds is None else round(seconds, 3))

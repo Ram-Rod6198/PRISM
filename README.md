@@ -3,7 +3,7 @@
 A desktop GUI application with two modes, both rendered through FFmpeg:
 
 - **Combine** - tile multiple video feeds into one frame (2x2, five-camera and custom layouts)
-- **Edit** - cut clips together on a timeline, trim them, and lay another video's audio underneath
+- **Edit** - the same tile canvas with a timeline row for every tile: move and trim clips, lay another video's audio underneath, and play the result in the window
 
 Built for users who need a simple visual workflow without opening a full video editor.
 
@@ -15,13 +15,13 @@ Built for users who need a simple visual workflow without opening a full video e
 
 ### Edit mode (timeline)
 
-- **Timeline** - add clips and they play one after another; drag a clip to reorder it
-- **Trim** - drag either end of a clip, or type exact times in the clip panel
+- **Same page as Combine** - the same preview, canvas presets, inspector, layer lists, audio choice and Render button, with a timeline underneath
+- **A timeline row per tile** - a video stays where you put it: drag it left or right, or onto another tile's row; a tile can hold several clips one after another
+- **Trim** - drag either end of a clip inward; what is left stays exactly where it was (a gap opens instead of the clips closing up). **Close Gaps** pulls them together when you want that
+- **Play** - plays the timeline in the preview with sound (`Space`), every tile and the text included
+- **Audio from another video** - **Add Audio** puts any video's or audio file's sound on the audio row; or drag a clip down there to keep only its sound
 - **Split and remove** - cut a clip at the playhead (`S`) and delete the part you don't want (`Del`)
-- **Audio from another video** - drop any video or audio file on the audio track, slide it into place, trim it, set its volume; mute the clips' own sound with one tick
-- **Frame preview** - the frame under the playhead, updated as you scrub; Quick Preview renders a small draft and opens it in your player
 - **Undo / redo** - every edit, `Ctrl+Z` / `Ctrl+Y`
-- **One-click export** - H.264 MP4 at the first clip's size or a chosen frame size, with progress and Cancel
 
 ### Combine mode (tiles)
 
@@ -70,16 +70,17 @@ Run the tests (no extra packages needed; the FFmpeg tests skip themselves if FFm
 
 ## Usage: Edit mode
 
-Open the **Edit (timeline)** tab.
+Open the **Edit (timeline)** tab. It is the Combine page with a timeline along the bottom: one row per tile, and an **Audio** row.
 
-1. **Add Clips** - pick one or more videos. They are appended to the video track in the order chosen.
-2. **Arrange** - drag a clip left or right to change the order. Drag a clip's left or right end to trim it. Click a clip and press `S` to split it at the playhead, `Del` to remove the selected clip.
-3. **Add Audio** - pick the video (or audio file) whose sound you want. It lands on the audio track at the playhead; drag it to line it up, drag its ends to trim. Adding the first audio clip mutes the clips' own sound; untick *Mute the clips' own audio* to hear both mixed.
-4. **Check** - click or drag on the timeline to move the playhead and see that frame. *Quick Preview* renders a fast low-resolution draft and opens it, so you can check the audio against the picture.
-5. **Export MP4** - choose where to save. The frame size defaults to the first clip's; clips of a different shape are fitted with black bars. Audio that runs past the last clip is cut off (shown shaded on the timeline).
+1. **Add Video** - pick one or more videos. Each goes to the first empty tile, as in Combine; once every tile has one, they queue up after the last clip (select a tile first to choose which). A new timeline starts with a single tile, and the first video sets the canvas to its own size. Pick a canvas preset for a tiled layout.
+2. **Arrange** - drag a clip left or right to move it, or onto another row to move it to that tile. Drag a clip's left or right end inward to trim it; the rest of the clip does not move. Dropping a clip onto another puts it in front of or behind that one and pushes later clips along. **Close Gaps** makes the clips of each tile play back to back.
+3. **Add Audio** - pick the video (or audio file) whose sound you want. It lands on the Audio row at the playhead. The Audio list then switches to *Audio track only*; choose *Mix all* to hear the videos as well, or *Tile N only* for one tile.
+4. **Play** - press **Play** or `Space`. Click or drag on the timeline to move the playhead; the preview shows that moment.
+5. **Render MP4** - choose where to save. Sound that runs past the last clip is cut off (shown shaded on the timeline).
 
 | Key | Action |
 |-----|--------|
+| `Space` | Play / pause |
 | `S` | Split at the playhead |
 | `Del` | Remove the selected clip |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
@@ -87,7 +88,9 @@ Open the **Edit (timeline)** tab.
 | `Home` / `End` | Jump to the start / end |
 | `Ctrl` + mouse wheel | Zoom the timeline |
 
-The clip panel on the right takes exact times (`HH:MM:SS`, `MM:SS` or seconds) for trim, audio start and volume.
+The Inspector takes exact times (`HH:MM:SS`, `MM:SS` or seconds) for a clip's trim and start, exactly as in Combine.
+
+Playback sound uses Windows' built-in player (or `afplay` / `paplay` / `aplay` / `ffplay` elsewhere). A tile shows its clip scaled to fill it, as in Combine.
 
 ## Usage: Combine mode
 
@@ -147,37 +150,40 @@ PRISM/
   tests/                         # unittest suite (python -m unittest discover -s tests -t .)
   video_combiner/
     app.py                       # The window: one tab per mode over a shared export bar
-    ffmpeg.py                    # All FFmpeg/FFprobe access: load media, still frames, encodes
+    workspace.py                 # TileWorkspace: the page layout both tabs are built on
+    project.py                   # TileProject: canvas, tiles, videos, text (what both documents share)
+    preview.py                   # Clickable canvas preview (thumbnails, exact frames, playback picture)
+    inspector.py                 # Editors for the selected video / tile / text
+    canvas_bar.py                # Preset and canvas-size controls
+    presets.py                   # Built-in and saved canvas presets
+    filters.py                   # FFmpeg filter-graph pieces both composers use
+    ffmpeg.py                    # All FFmpeg/FFprobe access: load media, still frames, encodes, frame streams
     export.py                    # ExportBar: runs encodes in the background, progress, cancel, log
+    speaker.py                   # Plays a sound file through the speakers
     media_picker.py              # "Choose files" dialog that returns only usable media
     timecode.py                  # Parsing and formatting of times
     widgets.py                   # Shared Tk widgets (layer list, scroll area, UI-thread calls)
-    combiner/                    # Combine mode
-      project.py                 # CombinerProject: tiles, videos, text overlays
+    combiner/                    # Combine mode: the n-th video plays in the n-th tile
+      project.py                 # CombinerProject
       composer.py                # project -> FFmpeg arguments
-      presets.py                 # Built-in and saved canvas presets
       workspace.py               # The Combine tab
-      preview.py                 # Clickable canvas preview
-      inspector.py               # Editors for the selected video / tile / text
-      canvas_bar.py              # Preset and canvas-size controls
-    editor/                      # Edit mode
-      timeline.py                # Timeline: clips, trim, split, reorder, undo
-      composer.py                # timeline -> FFmpeg arguments
-      workspace.py               # The Edit tab
+    editor/                      # Edit mode: every tile has a track of clips
+      timeline.py                # Timeline: place, trim, split, close gaps, undo
+      composer.py                # timeline -> FFmpeg arguments, for export and for playback
+      player.py                  # Real-time playback: frames from FFmpeg, paced against the sound
       timeline_view.py           # Mouse-editable timeline
-      frame_preview.py           # Frame under the playhead, fetched in the background
-      clip_inspector.py          # Exact trim / start / volume for the selected clip
+      workspace.py               # The Edit tab
 ```
 
 ## Architecture
 
-Each mode is a self-contained package with the same three layers:
+Both tabs are the same page (`TileWorkspace`) over the same kind of document (`TileProject`): a canvas of tiles, videos shown in them, text on top. The preview, inspector, canvas bar and layer lists are written once against that and know nothing of the modes. A mode adds only what is its own:
 
-- **Document** (`CombinerProject`, `Timeline`) - plain Python state plus the rules that keep it valid. No Tk, no FFmpeg.
+- **Document** (`CombinerProject`, `Timeline`) - which tile a video plays in and when, plus the rules that keep that valid. No Tk, no FFmpeg.
 - **Composer** (`compose(document)`) - turns a document into FFmpeg arguments. A pure function, so it is tested by comparing strings.
-- **Workspace** - the Tk tab. Panels edit the document directly and report back with a single "something changed" callback.
+- **Workspace** - a small subclass of the shared page. Edit adds the timeline view and the player.
 
-Both modes share `ffmpeg.py` (the only module that knows where the binaries are, how to launch them and how to read their output) and `ExportBar` (the only place encodes are run from the UI). Adding a mode means adding a package and one line in `app.py`.
+Everything shares `ffmpeg.py` (the only module that knows where the binaries are, how to launch them and how to read their output) and `ExportBar` (the only place encodes are run from the UI).
 
 ## Tech Stack
 

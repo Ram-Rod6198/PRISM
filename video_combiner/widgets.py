@@ -47,6 +47,7 @@ class LayerListPanel(ttk.LabelFrame):
     ``items`` returns the live list. ``on_select(index)`` fires when the user
     picks a row; ``on_edit(index)`` after the panel changed the list, with the
     row that should now be selected (None when the list became empty).
+    ``reorder=False`` leaves out Up / Down, for lists whose order means nothing.
     """
 
     def __init__(
@@ -58,27 +59,30 @@ class LayerListPanel(ttk.LabelFrame):
         on_add: Callable[[], None],
         on_select: Callable[[int], None],
         on_edit: Callable[[int | None], None],
+        reorder: bool = True,
     ) -> None:
         super().__init__(master, text=title)
         self._items = items
         self._on_select = on_select
         self._on_edit = on_edit
 
+        # The buttons are packed first, so a short panel shrinks the list rather than hiding them.
+        buttons = ttk.Frame(self)
+        buttons.pack(side="bottom", fill="x", padx=6, pady=(6, 6))
+        ttk.Button(buttons, text=add_label, command=on_add).pack(side="left")
+        ttk.Button(buttons, text="Remove", command=self._remove).pack(side="left", padx=(6, 0))
+        if reorder:
+            ttk.Button(buttons, text="Down", command=lambda: self._shift(+1)).pack(side="right")
+            ttk.Button(buttons, text="Up", command=lambda: self._shift(-1)).pack(side="right", padx=(0, 6))
+
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-        self._listbox = tk.Listbox(body, exportselection=False)
+        self._listbox = tk.Listbox(body, exportselection=False, height=3)
         self._listbox.pack(side="left", fill="both", expand=True)
         self._listbox.bind("<<ListboxSelect>>", self._handle_select)
         scrollbar = ttk.Scrollbar(body, orient="vertical", command=self._listbox.yview)
         scrollbar.pack(side="right", fill="y")
         self._listbox.configure(yscrollcommand=scrollbar.set)
-
-        buttons = ttk.Frame(self)
-        buttons.pack(fill="x", padx=6, pady=(6, 6))
-        ttk.Button(buttons, text=add_label, command=on_add).pack(side="left")
-        ttk.Button(buttons, text="Remove", command=self._remove).pack(side="left", padx=(6, 0))
-        ttk.Button(buttons, text="Down", command=lambda: self._shift(+1)).pack(side="right")
-        ttk.Button(buttons, text="Up", command=lambda: self._shift(-1)).pack(side="right", padx=(0, 6))
 
     def show(self, labels: list[str], selected: int | None) -> None:
         """Display one row per label and highlight row ``selected`` (None for no highlight)."""

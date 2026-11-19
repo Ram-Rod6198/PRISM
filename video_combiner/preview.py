@@ -1,14 +1,18 @@
-"""A scaled, clickable drawing of the combiner's output canvas."""
+"""A scaled, clickable drawing of a project's output canvas."""
 
 from __future__ import annotations
 
+import io
+import threading
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import ttk
 
 from PIL import Image, ImageOps, ImageTk
 
-from video_combiner.combiner.project import CombinerProject, Selection
+from video_combiner.ffmpeg import FFmpegError, still_frame
+from video_combiner.project import Selection, Slot, TileProject
+from video_combiner.widgets import UiThread
 
 _PICKABLE_KINDS = {
     "Videos Only": ("video",),
@@ -20,10 +24,17 @@ _SELECTED_OUTLINE = "#4da3ff"
 _SELECTED_TEXT_OUTLINE = "#ffd34d"
 _OUTSIDE_CANVAS_FILL = "#e6e6e6"
 _LABEL_FONT = ("Segoe UI", 9, "bold")
+_STILL_HEIGHT = 540
+_REMEMBERED_STILLS = 40
 
 
 class PreviewPane(ttk.Frame):
-    """Shows what the render will look like, using each video's thumbnail.
+    """Shows what the render will look like: the tiles, the video in each, and the text on top.
+
+    ``slots()`` says which video is in which tile right now. A slot that names
+    a moment of its video is drawn with that exact frame (fetched in the
+    background; the pane redraws itself when it arrives), any other with the
+    video's thumbnail.
 
     Clicking a layer reports it through ``on_select`` (None for a click on
     nothing). With "Allow Dragging" ticked, dragging a layer moves it in the
@@ -34,14 +45,20 @@ class PreviewPane(ttk.Frame):
     def __init__(
         self,
         master: tk.Misc,
-        project: CombinerProject,
+        project: TileProject,
+        slots: Callable[[], list[Slot]],
         on_select: Callable[[Selection], None],
         on_move: Callable[[], None],
+        title: str = "Static Preview",
     ) -> None:
         super().__init__(master)
         self._project = project
+        self._slots = slots
         self._on_select = on_select
         self._on_move = on_move
+        self._stills = _Stills(self, on_arrival=self._draw)
+        self._last_still: dict[int, Image.Image] = {}  # Per tile; shown while a newer frame is on its way.
+        self._playing: Image.Image | None = None
         self._selection: Selection = None
         self._zoom = 1.0
         self._pickable = tk.StringVar(value="Videos Only")
@@ -58,7 +75,7 @@ class PreviewPane(ttk.Frame):
 
         header = ttk.Frame(self)
         header.pack(fill="x", pady=(0, 6))
-        ttk.Label(header, text="Static Preview").pack(side="left")
+        ttk.Label(header, text=title).pack(side="left")
         ttk.Button(header, text="-", width=3, command=lambda: self._set_zoom(self._zoom / 1.25)).pack(
             side="left", padx=(8, 2)
         )
@@ -95,7 +112,18 @@ class PreviewPane(ttk.Frame):
     def refresh(self, selection: Selection) -> None:
         """Redraw from the project, outlining ``selection``."""
         self._selection = selection
+        self._playing = None
         self._draw()
+
+    def show_playing(self, picture: Image.Image) -> None:
+        """Show a finished picture of the whole canvas instead of the layers, until the next ``refresh``."""
+        self._playing = picture
+        self._draw()
+
+    def picture_size(self) -> tuple[int, int]:
+        """The size, in screen pixels, at which the output canvas is currently drawn."""
+        scale = self._layout()[0]
+        return max(2, round(self._project.canvas_w * scale)), max(2, round(self._project.canvas_h * scale))
 
     # --- geometry -------------------------------------------------------------
 
@@ -139,11 +167,22 @@ class PreviewPane(ttk.Frame):
 
         canvas.delete("all")
         self._photos.clear()
-        tile_boxes, video_boxes, text_boxes = [], [], []
         canvas.configure(scrollregion=(0, 0, total_w, total_h))
         canvas.create_rectangle(0, 0, total_w, total_h, fill="black", outline="")
+        if self._playing is not None:
+            left, top, right, bottom = box(0, 0, project.canvas_w, project.canvas_h)
+            picture = self._playing
+            if picture.size != (right - left, bottom - top):
+                picture = picture.resize((right - left, bottom - top), Image.Resampling.BILINEAR)
+            self._photos.append(ImageTk.PhotoImage(picture))
+            canvas.create_image(left, top, image=self._photos[-1], anchor="nw")
+            self._draw_frame_around_output(box, total_w, total_h)
+            return
+
+        tile_boxes, video_boxes, text_boxes = [], [], []
         show_names = not self._hide_tile_names.get()
-        slots = project.slots()
+        slots = self._slots()
+        self._stills.want([(slot.video.media.path, slot.frame_sec) for slot in slots if _has_moment(slot)])
 
         for slot in slots:
             x1, y1, x2, y2 = box(slot.tile.x, slot.tile.y, slot.tile.w, slot.tile.h)
@@ -156,8 +195,9 @@ class PreviewPane(ttk.Frame):
             if slot.video is None:
                 continue
             x1, y1, x2, y2 = box(slot.x, slot.y, slot.tile.w, slot.tile.h)
-            video_boxes.append(("video", slot.index, x1, y1, x2, y2))
-            photo = self._fitted_thumbnail(slot.video.media.thumb_path, x2 - x1, y2 - y1)
+            video_index = next(i for i, video in enumerate(project.videos) if video is slot.video)
+            video_boxes.append(("video", video_index, x1, y1, x2, y2))
+            photo = self._picture_of(slot, x2 - x1, y2 - y1)
             if photo is not None:
                 canvas.create_image(x1, y1, image=photo, anchor="nw")
             else:
@@ -188,7 +228,13 @@ class PreviewPane(ttk.Frame):
                 else:
                     canvas.create_rectangle(x1 + 2, y1 + 2, x2 - 2, y2 - 2, outline=_SELECTED_OUTLINE, width=3)
 
-        # Grey out everything beyond the output frame, so overflowing layers read as cropped.
+        self._draw_frame_around_output(box, total_w, total_h)
+
+    def _draw_frame_around_output(
+        self, box: Callable[..., tuple[int, int, int, int]], total_w: int, total_h: int
+    ) -> None:
+        """Grey out everything beyond the output frame, so overflowing layers read as cropped."""
+        canvas, project = self._canvas, self._project
         left, top, right, bottom = box(0, 0, project.canvas_w, project.canvas_h)
         for x1, y1, x2, y2 in (
             (0, 0, total_w, top),
@@ -204,8 +250,23 @@ class PreviewPane(ttk.Frame):
         self._canvas.create_rectangle(x, y, x + 70, y + 22, fill="#000000", outline="")
         self._canvas.create_text(x + 8, y + 11, text=name[:14], anchor="w", fill="white", font=_LABEL_FONT)
 
-    def _fitted_thumbnail(self, thumb_path: str | None, width: int, height: int) -> ImageTk.PhotoImage | None:
-        """The thumbnail cropped to fill ``width`` x ``height``, as the render crops the video; None if unavailable."""
+    def _picture_of(self, slot: Slot, width: int, height: int) -> ImageTk.PhotoImage | None:
+        """The slot's video cropped to fill ``width`` x ``height``, as the render crops it; None if unavailable."""
+        assert slot.video is not None
+        source, resampling = None, Image.Resampling.BILINEAR
+        if _has_moment(slot):
+            source = self._stills.get(slot.video.media.path, slot.frame_sec) or self._last_still.get(slot.index)
+            if source is not None:
+                self._last_still[slot.index] = source
+        if source is None:
+            source, resampling = self._thumbnail(slot.video.media.thumb_path), Image.Resampling.LANCZOS
+        if source is None:
+            return None
+        photo = ImageTk.PhotoImage(ImageOps.fit(source, (width, height), method=resampling))
+        self._photos.append(photo)
+        return photo
+
+    def _thumbnail(self, thumb_path: str | None) -> Image.Image | None:
         if thumb_path is None:
             return None
         if thumb_path not in self._thumbnails:
@@ -214,12 +275,7 @@ class PreviewPane(ttk.Frame):
                     self._thumbnails[thumb_path] = image.convert("RGB")
             except OSError:
                 self._thumbnails[thumb_path] = None
-        source = self._thumbnails[thumb_path]
-        if source is None:
-            return None
-        photo = ImageTk.PhotoImage(ImageOps.fit(source, (width, height), method=Image.Resampling.LANCZOS))
-        self._photos.append(photo)
-        return photo
+        return self._thumbnails[thumb_path]
 
     # --- mouse ----------------------------------------------------------------
 
@@ -256,3 +312,60 @@ class PreviewPane(ttk.Frame):
         else:
             self._project.texts[index].x, self._project.texts[index].y = x, y
         self._on_move()
+
+
+def _has_moment(slot: Slot) -> bool:
+    return slot.video is not None and slot.frame_sec is not None
+
+
+class _Stills:
+    """Exact frames of videos, fetched in the background and remembered for a while.
+
+    ``want`` names the frames that matter now; anything asked for earlier and
+    not yet fetched is dropped, so scrubbing never works through a backlog.
+    ``on_arrival()`` is called on the Tk thread whenever a wanted frame came in.
+    """
+
+    def __init__(self, widget: tk.Misc, on_arrival: Callable[[], None]) -> None:
+        self._on_arrival = on_arrival
+        self._ui = UiThread(widget)
+        self._frames: dict[tuple[str, float], Image.Image | None] = {}
+        self._wanted: list[tuple[str, float]] = []
+        self._fetching = False
+
+    def want(self, frames: list[tuple[str, float]]) -> None:
+        self._wanted = [key for key in map(_key, frames) if key not in self._frames]
+        self._fetch_next()
+
+    def get(self, path: str, sec: float) -> Image.Image | None:
+        """The frame if it has been fetched; None if not yet, or if it cannot be had."""
+        return self._frames.get(_key((path, sec)))
+
+    def _fetch_next(self) -> None:
+        if self._fetching or not self._wanted:
+            return
+        self._fetching = True
+        key = self._wanted.pop(0)
+
+        def work() -> None:
+            try:
+                image: Image.Image | None = Image.open(io.BytesIO(still_frame(*key, max_height=_STILL_HEIGHT)))
+                image.load()
+            except (FFmpegError, OSError):
+                image = None  # Drawn from the thumbnail instead.
+            self._ui.call(self._fetched, key, image)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _fetched(self, key: tuple[str, float], image: Image.Image | None) -> None:
+        self._fetching = False
+        self._frames[key] = image.convert("RGB") if image is not None else None
+        while len(self._frames) > _REMEMBERED_STILLS:
+            del self._frames[next(iter(self._frames))]
+        # Redrawing asks again for whatever is still missing, which starts the next fetch.
+        self._on_arrival()
+        self._fetch_next()
+
+
+def _key(frame: tuple[str, float]) -> tuple[str, float]:
+    return frame[0], round(frame[1], 3)

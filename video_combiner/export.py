@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import atexit
-import itertools
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import tkinter as tk
 from collections.abc import Callable
@@ -73,12 +69,6 @@ class ExportBar(ttk.Frame):
         )
         if output_path:
             self._start(args, duration, output_path, self._offer_to_open)
-
-    def preview(self, args: list[str], duration: float) -> None:
-        """Encode to a throwaway file and open it in the system's video player."""
-        if self.busy:
-            return
-        self._start(args, duration, _new_preview_path(), _open_in_default_app)
 
     def show_log(self) -> None:
         """Open (or raise) the window with the last encode's exact command and FFmpeg output."""
@@ -199,19 +189,6 @@ class _LogWindow(tk.Toplevel):
     def _copy_command(self) -> None:
         self.clipboard_clear()
         self.clipboard_append(self._command)
-
-
-_preview_numbers = itertools.count(1)
-_preview_dir: str | None = None
-
-
-def _new_preview_path() -> str:
-    """A fresh file name per preview: a player may still hold the previous preview open."""
-    global _preview_dir
-    if _preview_dir is None:
-        _preview_dir = tempfile.mkdtemp(prefix="prism_preview_")
-        atexit.register(shutil.rmtree, _preview_dir, ignore_errors=True)
-    return str(Path(_preview_dir) / f"preview_{next(_preview_numbers)}.mp4")
 
 
 def _open_in_default_app(path: str) -> None:

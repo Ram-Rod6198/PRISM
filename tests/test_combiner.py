@@ -4,8 +4,9 @@ import unittest
 from unittest import mock
 
 from video_combiner.combiner.composer import compose
-from video_combiner.combiner.presets import CanvasPresetStore
-from video_combiner.combiner.project import AUDIO_NONE, CombinerProject, TextOverlay, Tile, VideoItem
+from video_combiner.presets import CanvasPresetStore
+from video_combiner.combiner.project import CombinerProject
+from video_combiner.project import AUDIO_NONE, TextOverlay, Tile, VideoItem
 from video_combiner.ffmpeg import MediaInfo
 
 

@@ -7,10 +7,11 @@ import unittest
 from pathlib import Path
 
 from video_combiner.combiner import composer as combiner_composer
-from video_combiner.combiner.project import CombinerProject, TextOverlay, VideoItem
+from video_combiner.combiner.project import CombinerProject
 from video_combiner.editor import composer as editor_composer
-from video_combiner.editor.timeline import Timeline
-from video_combiner.ffmpeg import Encode, FFmpegError, load_media, still_frame
+from video_combiner.editor.timeline import AUDIO_TRACK, Timeline
+from video_combiner.ffmpeg import Encode, FFmpegError, FrameStream, load_media, still_frame
+from video_combiner.project import TextOverlay, Tile, VideoItem
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is not on PATH")
@@ -47,19 +48,49 @@ class RenderTest(unittest.TestCase):
         self.assertTrue(still_frame(self.bars.path, 1.0).startswith(b"\xff\xd8"))
         self.assertTrue(still_frame(self.bars.path, self.bars.duration).startswith(b"\xff\xd8"))
 
-    def test_editor_export(self):
+    def _timeline(self):
         timeline = Timeline()
+        timeline.set_layout(640, 180, [Tile(0, 0, 320, 180, "Left"), Tile(320, 0, 320, 180, "Right")])
         clip = timeline.add_video(self.bars)
         timeline.add_video(self.silent)
-        timeline.trim(clip, in_sec=1.0)
-        timeline.video_muted = True
-        timeline.add_audio(self.music, start_sec=0.5)
+        timeline.trim(clip, trim_start_sec=1.0)  # Now plays from 1 s to 3 s, after a second of nothing.
+        timeline.audio = AUDIO_TRACK
+        timeline.add_sound(self.music, start_sec=0.5)
+        return timeline
+
+    def test_editor_export(self):
+        timeline = self._timeline()
         progress = []
         Encode(editor_composer.compose(timeline), self._out("edit.mp4")).run(on_progress=progress.append)
         result = load_media(self._out("edit.mp4"))
-        self.assertEqual((result.width, result.height, result.has_audio), (640, 360, True))
-        self.assertAlmostEqual(result.duration, 4.0, delta=0.15)
+        self.assertEqual((result.width, result.height, result.has_audio), (640, 180, True))
+        self.assertAlmostEqual(result.duration, 3.0, delta=0.15)
         self.assertTrue(progress)
+
+    def test_editor_playback_gives_frames_and_sound(self):
+        plan = editor_composer.compose_playback(self._timeline(), 0.5, fit_within=(320, 320))
+        self.assertEqual((plan.width, plan.height), (320, 90))
+        stream = FrameStream(plan.picture, plan.width, plan.height)
+        frames = []
+        while (frame := stream.read()) is not None:
+            frames.append(frame)
+        self.assertAlmostEqual(len(frames), plan.duration * plan.fps, delta=2)
+        self.assertEqual(len(frames[0]), 320 * 90 * 3)
+        # Half a second in, the left tile is still empty (black) and the right one shows the red video.
+        row = frames[0][45 * 320 * 3 : 46 * 320 * 3]
+        self.assertLess(max(row[: 100 * 3]), 40)
+        self.assertGreater(row[250 * 3], 150)
+        Encode(plan.sound, self._out("playback.wav")).run()
+        self.assertAlmostEqual(load_media(self._out("playback.wav")).duration, 2.5, delta=0.1)
+
+    def test_frame_stream_reports_failure_and_can_be_closed_early(self):
+        with self.assertRaises(FFmpegError):
+            FrameStream(["-i", self._out("missing.mp4")], 16, 16).read()
+        stream = FrameStream(["-f", "lavfi", "-i", "testsrc2=s=64x64:r=30:d=600"], 64, 64)
+        self.assertIsNotNone(stream.read())
+        stream.close()
+        while stream.read() is not None:
+            pass
 
     def test_combiner_render(self):
         project = CombinerProject()

@@ -197,31 +197,85 @@ class Encode:
             self._process.terminate()
 
 
+class FrameStream:
+    """Video decoded by FFmpeg into plain pictures, handed over one at a time.
+
+    ``args`` are FFmpeg arguments (inputs, filters, mapping) whose video output
+    is ``width`` x ``height``. FFmpeg works ahead only as far as its pipe
+    holds, so reading at playing speed costs no more than playing. Reading and
+    closing may happen on different threads.
+    """
+
+    def __init__(self, args: list[str], width: int, height: int) -> None:
+        self._frame_bytes = width * height * 3
+        self._closed = False
+        command = [_tool("ffmpeg"), "-hide_banner", "-nostdin", "-v", "error", *args]
+        command += ["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+        try:
+            self._process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=self._frame_bytes,
+                **_no_console_window(),
+            )
+        except OSError as exc:
+            raise FFmpegNotFound(_NOT_FOUND.format(tool="ffmpeg")) from exc
+
+    def read(self) -> bytes | None:
+        """The next frame as ``width * height`` RGB pixels, row by row; None when there are no more.
+
+        Raises ``FFmpegError`` if FFmpeg gave up rather than finished. After
+        ``close()`` there are simply no more frames.
+        """
+        assert self._process.stdout is not None and self._process.stderr is not None
+        try:
+            frame = self._process.stdout.read(self._frame_bytes)
+        except (OSError, ValueError):  # The pipe was closed under us by close().
+            frame = b""
+        if len(frame) == self._frame_bytes:
+            return frame
+        try:
+            complaint = self._process.stderr.read().decode("utf-8", errors="replace")
+        except (OSError, ValueError):
+            complaint = ""
+        failed = self._process.wait() != 0
+        self._process.stdout.close()
+        self._process.stderr.close()
+        if failed and not self._closed:
+            raise FFmpegError(_last_line(complaint) or "FFmpeg could not decode the video.")
+        return None
+
+    def close(self) -> None:
+        """Stop decoding. Safe to call more than once."""
+        self._closed = True
+        if self._process.poll() is None:
+            self._process.terminate()
+
+
 def mp4_output_args(
     video_label: str,
     audio_label: str | None,
     fps: float,
     duration: float,
-    draft: bool = False,
 ) -> list[str]:
     """Arguments that encode the filter outputs ``[video_label]``/``[audio_label]`` as H.264/AAC MP4.
 
-    ``audio_label`` None means a silent file. ``draft`` trades quality for speed,
-    for previews that are watched once and thrown away.
+    ``audio_label`` None means a silent file.
     """
     args = ["-map", f"[{video_label}]"]
     if audio_label:
         args += ["-map", f"[{audio_label}]", "-c:a", "aac", "-b:a", "192k"]
     else:
         args += ["-an"]
-    crf, preset = ("30", "ultrafast") if draft else ("18", "veryfast")
     return args + [
         "-r", time_arg(fps),
         "-t", time_arg(duration),
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
-        "-crf", crf,
-        "-preset", preset,
+        "-crf", "18",
+        "-preset", "veryfast",
         "-movflags", "+faststart",
     ]
 

@@ -1,4 +1,4 @@
-"""Controls for the combiner's output canvas: layout presets and canvas size."""
+"""Controls for a project's output canvas: layout presets and canvas size."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import tkinter as tk
 from collections.abc import Callable
 from tkinter import messagebox, ttk
 
-from video_combiner.combiner.presets import CanvasPreset, CanvasPresetStore
-from video_combiner.combiner.project import CombinerProject
+from video_combiner.presets import CanvasPreset, CanvasPresetStore
+from video_combiner.project import TileProject
 
 
 class CanvasBar(ttk.LabelFrame):
@@ -17,10 +17,11 @@ class CanvasBar(ttk.LabelFrame):
 
     Edits go straight into the project; ``on_change(message)`` follows each one
     with a note for the status line. Width and Height accept whole numbers or
-    simple arithmetic such as ``1920*2``.
+    simple arithmetic such as ``1920*2``. Call ``refresh()`` after the canvas
+    was changed from elsewhere.
     """
 
-    def __init__(self, master: tk.Misc, project: CombinerProject, on_change: Callable[[str], None]) -> None:
+    def __init__(self, master: tk.Misc, project: TileProject, on_change: Callable[[str], None]) -> None:
         super().__init__(master, text="Canvas Presets / Output Canvas")
         self._project = project
         self._on_change = on_change
@@ -55,7 +56,21 @@ class CanvasBar(ttk.LabelFrame):
         ttk.Label(save_row, text="Save this canvas and its tiles as").pack(side="left")
         ttk.Entry(save_row, textvariable=self._preset_name, width=24).pack(side="left", padx=(4, 8))
         ttk.Button(save_row, text="Save/Update", command=self._save).pack(side="left")
-        self._list_presets(select=self._store.presets[0])
+        self._shown_size = (project.canvas_w, project.canvas_h)
+        self._list_presets(select=self._preset_in_use())
+
+    def refresh(self) -> None:
+        """Show the project's canvas size, if it is no longer the one on display.
+
+        Otherwise the fields are left alone: they may hold a size the user is
+        still typing.
+        """
+        size = (self._project.canvas_w, self._project.canvas_h)
+        if size != self._shown_size:
+            self._shown_size = size
+            self._width.set(str(size[0]))
+            self._height.set(str(size[1]))
+            self._list_presets(select=self._preset_in_use())
 
     def _list_presets(self, select: CanvasPreset | None) -> None:
         presets = self._store.presets
@@ -64,6 +79,12 @@ class CanvasBar(ttk.LabelFrame):
             self._preset_list.current(presets.index(select))
         else:
             self._preset_list.set("")
+
+    def _preset_in_use(self) -> CanvasPreset | None:
+        """The preset the project's canvas and tiles currently match, if any."""
+        project = self._project
+        in_use = (project.canvas_w, project.canvas_h, project.tiles)
+        return next((p for p in self._store.presets if (p.width, p.height, p.tiles) == in_use), None)
 
     def _selected(self) -> CanvasPreset | None:
         index = self._preset_list.current()
@@ -75,6 +96,7 @@ class CanvasBar(ttk.LabelFrame):
             return
         self._project.set_layout(preset.width, preset.height, preset.tiles)
         self._preset_name.set(preset.name)
+        self._shown_size = (preset.width, preset.height)
         self._width.set(str(preset.width))
         self._height.set(str(preset.height))
         self._on_change(f"Applied canvas preset: {preset.name}")
@@ -96,6 +118,7 @@ class CanvasBar(ttk.LabelFrame):
         if size is None:
             return
         self._project.resize_canvas(*size, scale_content=self._scale_content.get())
+        self._shown_size = size
         self._width.set(str(size[0]))
         self._height.set(str(size[1]))
         scaled = " (layout scaled)" if self._scale_content.get() else ""

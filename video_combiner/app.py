@@ -15,7 +15,7 @@ def create_window(start_in_editor: bool = False) -> tk.Tk:
     """Build the PRISM window, ready for ``mainloop()``."""
     root = tk.Tk()
     root.title("PRISM")
-    root.geometry("1520x860")
+    root.geometry("1520x900")
     root.minsize(1320, 780)
 
     export_bar = ExportBar(root)

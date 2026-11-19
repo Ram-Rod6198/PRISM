@@ -1,4 +1,4 @@
-"""The timeline drawn as two tracks that can be edited with the mouse."""
+"""The timeline drawn as one row per tile plus an audio row, editable with the mouse."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from video_combiner.editor.timeline import Clip, Timeline
 from video_combiner.timecode import format_duration
 
 _LEFT_PAD = 10
+_LABEL_W = 76
 _RULER_H = 26
-_TRACK_H = 62
-_VIDEO_Y = _RULER_H + 6
-_AUDIO_Y = _VIDEO_Y + _TRACK_H + 10
-_HEIGHT = _AUDIO_Y + _TRACK_H + 8
+_ROW_H = 40
+_ROW_GAP = 4
+_MAX_HEIGHT = 250  # Taller timelines scroll, so the preview above keeps its room.
 _EDGE_PX = 7  # How close to a clip's end the pointer must be to grab the edge.
 _SNAP_PX = 8
 _DRAG_THRESHOLD_PX = 4
@@ -37,45 +37,56 @@ class _Drag:
     mode: str  # "scrub", "body", "in" or "out"
     clip: Clip | None = None
     press_x: float = 0.0
-    in_sec: float = 0.0
-    out_sec: float = 0.0
+    trim_start_sec: float = 0.0
+    trim_end_sec: float = 0.0
     start_sec: float = 0.0
     moved: bool = False
+    # Where a dragged clip would land: (tile, start). It is only moved for real on release,
+    # so the clips it will push aside stay put while the user is still choosing a spot.
+    landing: tuple[int | None, float] | None = None
 
 
 class TimelineView(ttk.Frame):
     """Shows a Timeline and lets the user edit it directly.
 
-    Mouse: click a clip to select it, drag it to reorder (video) or reposition
-    (audio), drag either end to trim; click or drag anywhere else to move the
+    Mouse: click a clip to select it; drag it along its row to move it, or
+    onto another row to move it to that tile (the audio row keeps only its
+    sound); drag either end to trim. Click or drag anywhere else to move the
     playhead. The wheel scrolls, Ctrl+wheel zooms. Every drag is one undo step.
 
-    ``selected`` and ``playhead`` hold the view's state. ``on_change()`` is
-    called after the user changed either of them or the timeline. Call
-    ``refresh()`` after changing the timeline from outside.
+    ``playhead`` is the time the view points at. ``on_select(clip)`` reports a
+    click on a clip (None: on nothing); ``on_change()`` follows every change
+    the user made to the playhead or the timeline. Call ``refresh`` after
+    changing the timeline or the selection from outside.
     """
 
-    def __init__(self, master: tk.Misc, timeline: Timeline, on_change: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        timeline: Timeline,
+        on_select: Callable[[Clip | None], None],
+        on_change: Callable[[], None],
+    ) -> None:
         super().__init__(master)
         self._timeline = timeline
+        self._on_select = on_select
         self._on_change = on_change
-        self.selected: Clip | None = None
         self.playhead = 0.0
+        self._selected: Clip | None = None
         self._zoom = 60.0
         self._drag: _Drag | None = None
         self._thumbnails: dict[str, ImageTk.PhotoImage | None] = {}
 
         self.columnconfigure(1, weight=1)
-        labels = tk.Canvas(self, width=52, height=_HEIGHT, highlightthickness=0, bg="#2a2d33")
-        labels.grid(row=0, column=0, sticky="ns")
-        for text, y in (("Video", _VIDEO_Y), ("Audio", _AUDIO_Y)):
-            labels.create_text(26, y + _TRACK_H // 2, text=text, fill="#d0d4da", font=_FONT)
-
-        self._canvas = tk.Canvas(self, height=_HEIGHT, highlightthickness=0, bg="#22252a")
+        self._labels = tk.Canvas(self, width=_LABEL_W, height=_MAX_HEIGHT, highlightthickness=0, bg="#2a2d33")
+        self._labels.grid(row=0, column=0, sticky="ns")
+        self._canvas = tk.Canvas(self, height=_MAX_HEIGHT, highlightthickness=0, bg="#22252a")
         self._canvas.grid(row=0, column=1, sticky="ew")
-        scrollbar = ttk.Scrollbar(self, orient="horizontal", command=self._canvas.xview)
-        scrollbar.grid(row=1, column=1, sticky="ew")
-        self._canvas.configure(xscrollcommand=scrollbar.set)
+        x_scroll = ttk.Scrollbar(self, orient="horizontal", command=self._canvas.xview)
+        x_scroll.grid(row=1, column=1, sticky="ew")
+        y_scroll = ttk.Scrollbar(self, orient="vertical", command=self._scroll_rows)
+        y_scroll.grid(row=0, column=2, sticky="ns")
+        self._canvas.configure(xscrollcommand=x_scroll.set, yscrollcommand=y_scroll.set)
 
         self._canvas.bind("<Button-1>", self._handle_press)
         self._canvas.bind("<B1-Motion>", self._handle_motion)
@@ -88,22 +99,16 @@ class TimelineView(ttk.Frame):
 
     # --- driven from outside -------------------------------------------------
 
-    def refresh(self) -> None:
-        """Redraw after the timeline was changed elsewhere; a selected clip that is gone is deselected."""
-        clips = self._timeline.video + self._timeline.audio
-        if not any(self.selected is clip for clip in clips):
-            self.selected = None
+    def refresh(self, selected: Clip | None) -> None:
+        """Redraw from the timeline, with ``selected`` highlighted."""
+        self._selected = selected
         self.playhead = min(self.playhead, self._timeline.extent)
-        self._draw()
-
-    def select(self, clip: Clip | None) -> None:
-        self.selected = clip
         self._draw()
 
     def set_playhead(self, sec: float) -> None:
         """Move the playhead (kept within the timeline) and scroll it into view."""
         self.playhead = max(0.0, min(sec, self._timeline.extent))
-        self._draw()
+        self._draw_playhead()
         x, left = self._x_of(self.playhead), self._canvas.canvasx(0)
         width = self._canvas.winfo_width()
         if not left + 20 <= x <= left + width - 20:
@@ -127,6 +132,21 @@ class TimelineView(ttk.Frame):
 
     # --- geometry -------------------------------------------------------------
 
+    def _rows(self) -> list[int | None]:
+        """The track shown in each row, top to bottom: every tile, then the audio track (None)."""
+        return [*range(len(self._timeline.tiles)), None]
+
+    def _row_y(self, row: int) -> int:
+        return _RULER_H + _ROW_GAP + row * (_ROW_H + _ROW_GAP)
+
+    def _row_at(self, y: float) -> int:
+        """The row at canvas y, or the nearest one when y is above or below them all."""
+        row = int((y - _RULER_H - _ROW_GAP / 2) // (_ROW_H + _ROW_GAP))
+        return max(0, min(row, len(self._rows()) - 1))
+
+    def _content_height(self) -> int:
+        return self._row_y(len(self._rows()))
+
     def _x_of(self, sec: float) -> float:
         return _LEFT_PAD + sec * self._zoom
 
@@ -139,16 +159,17 @@ class TimelineView(ttk.Frame):
     def _scroll_to(self, left_x: float) -> None:
         self._canvas.xview_moveto(max(0.0, left_x) / self._total_width())
 
+    def _scroll_rows(self, *args: str) -> None:
+        self._canvas.yview(*args)
+        self._labels.yview(*args)
+
     def _hit(self, x: float, y: float) -> tuple[Clip, str] | None:
         """The clip under canvas point (x, y) and the part grabbed: "in", "out" or "body"."""
-        if _VIDEO_Y <= y <= _VIDEO_Y + _TRACK_H:
-            track = self._timeline.video
-        elif _AUDIO_Y <= y <= _AUDIO_Y + _TRACK_H:
-            track = self._timeline.audio
-        else:
+        row = self._row_at(y)
+        if not self._row_y(row) <= y <= self._row_y(row) + _ROW_H:
             return None
-        for clip in reversed(track):  # Later clips are drawn on top.
-            left, right = self._x_of(clip.start_sec), self._x_of(clip.end_sec)
+        for clip in reversed(self._timeline.track(self._rows()[row])):  # Later clips are drawn on top.
+            left, right = self._x_of(clip.start_at_sec), self._x_of(clip.end_sec)
             if left <= x <= right:
                 edge = min(_EDGE_PX, (right - left) / 3)
                 return clip, "in" if x - left <= edge else "out" if right - x <= edge else "body"
@@ -159,9 +180,9 @@ class TimelineView(ttk.Frame):
         points = [0.0, self._timeline.duration]
         if moving is not None:
             points.append(self.playhead)
-        for clip in self._timeline.video + self._timeline.audio:
+        for clip in self._timeline.videos:
             if clip is not moving:
-                points += [clip.start_sec, clip.end_sec]
+                points += [clip.start_at_sec, clip.end_sec]
         nearest = min(points, key=lambda point: abs(point - sec))
         return nearest if abs(nearest - sec) * self._zoom <= _SNAP_PX else sec
 
@@ -170,11 +191,18 @@ class TimelineView(ttk.Frame):
     def _draw(self) -> None:
         canvas, timeline = self._canvas, self._timeline
         canvas.delete("all")
-        total_w = self._total_width()
-        canvas.configure(scrollregion=(0, 0, total_w, _HEIGHT))
-        canvas.create_rectangle(0, _VIDEO_Y, total_w, _VIDEO_Y + _TRACK_H, fill="#2b2f36", outline="")
-        canvas.create_rectangle(0, _AUDIO_Y, total_w, _AUDIO_Y + _TRACK_H, fill="#2a322d", outline="")
+        rows = self._rows()
+        total_w, content_h = self._total_width(), self._content_height()
+        height = min(content_h, _MAX_HEIGHT)
+        for widget in (canvas, self._labels):
+            widget.configure(height=height)
+        canvas.configure(scrollregion=(0, 0, total_w, content_h))
+        self._draw_labels(content_h)
 
+        for row, track in enumerate(rows):
+            y = self._row_y(row)
+            fill = "#2a322d" if track is None else "#2b2f36"
+            canvas.create_rectangle(0, y, total_w, y + _ROW_H, fill=fill, outline="")
         step = next((s for s in _TICK_STEPS if s * self._zoom >= 70), _TICK_STEPS[-1])
         for tick in range(int(self._sec_at(total_w) / step) + 1):
             x = self._x_of(tick * step)
@@ -183,72 +211,91 @@ class TimelineView(ttk.Frame):
                 x + 3, 3, text=_ruler_label(tick * step, step), anchor="nw", fill="#b8bcc4", font=_FONT_SMALL
             )
 
-        if not timeline.video:
-            self._draw_hint(_VIDEO_Y, "Add Clips: they play one after another, in this order")
-        if not timeline.audio:
-            self._draw_hint(_AUDIO_Y, "Add Audio: a video or audio file whose sound plays under the clips")
-        for clip in timeline.video:
-            self._draw_clip(clip, _VIDEO_Y, _VIDEO_COLORS, with_thumbnail=True)
-        for clip in timeline.audio:
-            self._draw_clip(clip, _AUDIO_Y, _AUDIO_COLORS, with_thumbnail=False)
+        if not timeline.videos:
+            self._draw_hint(0, "Add Video puts videos here. Drag one to move it; drag its ends to trim.")
+            self._draw_hint(len(rows) - 1, "Add Audio, or drag a video down here to use only its sound.")
+        dragged = self._drag.clip if self._drag is not None and self._drag.landing is not None else None
+        for row, track in enumerate(rows):
+            for clip in timeline.track(track):
+                self._draw_clip(clip, row, clip.start_at_sec, faded=clip is dragged)
+        if dragged is not None:
+            tile, start = self._drag.landing
+            self._draw_clip(dragged, rows.index(tile), start)
 
         end_x = self._x_of(timeline.duration)
-        if timeline.extent > timeline.duration and timeline.video:
-            # Audio past the end of the picture is not exported; show where it is cut.
-            cut_off = (end_x, _AUDIO_Y, self._x_of(timeline.extent), _AUDIO_Y + _TRACK_H)
+        if timeline.extent > timeline.duration and timeline.duration > 0:
+            # Sound past the end of the picture is not exported; show where it is cut.
+            cut_off = (end_x, _RULER_H, self._x_of(timeline.extent), content_h)
             canvas.create_rectangle(*cut_off, fill="#101010", stipple="gray50", outline="")
-            canvas.create_line(end_x, _RULER_H, end_x, _HEIGHT, fill="#ff8a65", dash=(4, 3))
+            canvas.create_line(end_x, _RULER_H, end_x, content_h, fill="#ff8a65", dash=(4, 3))
+        self._draw_playhead()
 
+    def _draw_playhead(self) -> None:
+        canvas = self._canvas
+        canvas.delete("playhead")
         x = self._x_of(self.playhead)
-        canvas.create_line(x, 0, x, _HEIGHT, fill="#ff5252", width=2)
-        canvas.create_polygon(x - 6, 0, x + 6, 0, x, 9, fill="#ff5252", outline="")
+        canvas.create_line(x, 0, x, self._content_height(), fill="#ff5252", width=2, tags="playhead")
+        canvas.create_polygon(x - 6, 0, x + 6, 0, x, 9, fill="#ff5252", outline="", tags="playhead")
 
-    def _draw_hint(self, track_y: int, text: str) -> None:
+    def _draw_labels(self, content_h: int) -> None:
+        labels = self._labels
+        labels.delete("all")
+        labels.configure(scrollregion=(0, 0, _LABEL_W, content_h))
+        for row, track in enumerate(self._rows()):
+            name = "Audio" if track is None else self._timeline.tiles[track].name
+            labels.create_text(
+                8, self._row_y(row) + _ROW_H // 2, text=name[:11], anchor="w", fill="#d0d4da", font=_FONT
+            )
+
+    def _draw_hint(self, row: int, text: str) -> None:
         self._canvas.create_text(
             self._canvas.canvasx(0) + _LEFT_PAD + 6,
-            track_y + _TRACK_H // 2,
+            self._row_y(row) + _ROW_H // 2,
             text=text,
             anchor="w",
             fill="#7d838c",
             font=_FONT,
         )
 
-    def _draw_clip(self, clip: Clip, track_y: int, colors: tuple[str, str], with_thumbnail: bool) -> None:
+    def _draw_clip(self, clip: Clip, row: int, start_sec: float, faded: bool = False) -> None:
         canvas = self._canvas
-        fill, accent = colors
-        left, right = self._x_of(clip.start_sec), self._x_of(clip.end_sec)
-        top, bottom = track_y + 2, track_y + _TRACK_H - 2
-        selected = clip is self.selected
+        on_audio_row = self._rows()[row] is None
+        fill, accent = _AUDIO_COLORS if on_audio_row else _VIDEO_COLORS
+        left = self._x_of(start_sec)
+        right = left + (clip.end_sec - clip.start_at_sec) * self._zoom
+        top, bottom = self._row_y(row) + 2, self._row_y(row) + _ROW_H - 2
+        selected = clip is self._selected and not faded
         canvas.create_rectangle(
             left,
             top,
             right,
             bottom,
             fill=fill,
+            stipple="gray25" if faded else "",
             outline=_SELECTED_OUTLINE if selected else "#15171a",
             width=3 if selected else 1,
         )
+        if faded:
+            return
         # Grips mark the ends that can be dragged to trim.
         for grip_x in (left + 3, right - 3):
             if right - left > 14:
-                canvas.create_line(grip_x, top + 8, grip_x, bottom - 8, fill=accent, width=2)
+                canvas.create_line(grip_x, top + 7, grip_x, bottom - 7, fill=accent, width=2)
 
         text_x = left + 9
-        thumbnail = self._thumbnail(clip.media.thumb_path) if with_thumbnail else None
+        thumbnail = None if on_audio_row else self._thumbnail(clip.media.thumb_path)
         if thumbnail is not None and right - left > thumbnail.width() + 24:
             canvas.create_image(left + 7, top + 2, image=thumbnail, anchor="nw")
             text_x += thumbnail.width() + 4
         # Canvas text cannot be clipped, so only as many characters as fit are drawn.
         fitting_chars = int((right - text_x - 6) / 7)
         if fitting_chars >= 3:
-            details = format_duration(clip.duration)
-            if clip.volume != 1.0:
-                details += f"   vol {clip.volume:.0%}"
+            length = format_duration(clip.end_sec - clip.start_at_sec)
             canvas.create_text(
-                text_x, top + 5, text=clip.media.name[:fitting_chars], anchor="nw", fill="white", font=_FONT
+                text_x, top + 4, text=clip.media.name[:fitting_chars], anchor="nw", fill="white", font=_FONT
             )
             canvas.create_text(
-                text_x, top + 24, text=details[:fitting_chars], anchor="nw", fill=accent, font=_FONT_SMALL
+                text_x, top + 20, text=length[:fitting_chars], anchor="nw", fill=accent, font=_FONT_SMALL
             )
 
     def _thumbnail(self, thumb_path: str | None) -> ImageTk.PhotoImage | None:
@@ -257,7 +304,7 @@ class TimelineView(ttk.Frame):
         if thumb_path not in self._thumbnails:
             try:
                 with Image.open(thumb_path) as image:
-                    height = _TRACK_H - 8
+                    height = _ROW_H - 8
                     width = max(1, round(image.width * height / image.height))
                     self._thumbnails[thumb_path] = ImageTk.PhotoImage(image.convert("RGB").resize((width, height)))
             except OSError:
@@ -268,81 +315,80 @@ class TimelineView(ttk.Frame):
 
     def _handle_press(self, event: tk.Event) -> None:
         self._canvas.focus_set()
-        x = self._canvas.canvasx(event.x)
-        hit = self._hit(x, event.y)
+        x, y = self._canvas.canvasx(event.x), self._canvas.canvasy(event.y)
+        hit = self._hit(x, y)
         if hit is None:
             self._drag = _Drag("scrub")
-            if event.y > _RULER_H:
-                self.selected = None
+            if y > _RULER_H:
+                self._on_select(None)
             self._scrub(x)
             return
         clip, part = hit
-        self._drag = _Drag(part, clip, x, clip.in_sec, clip.out_sec, clip.start_sec)
-        self.selected = clip
-        self._draw()
-        self._on_change()
+        trim_start, trim_end = clip.trim_bounds()
+        self._drag = _Drag(part, clip, x, trim_start, trim_end, clip.start_at_sec)
+        self._on_select(clip)
 
     def _handle_motion(self, event: tk.Event) -> None:
         drag = self._drag
         if drag is None:
             return
-        x = self._canvas.canvasx(event.x)
+        x, y = self._canvas.canvasx(event.x), self._canvas.canvasy(event.y)
         if drag.mode == "scrub":
             self._scrub(x)
             return
         if not drag.moved:
-            if abs(x - drag.press_x) < _DRAG_THRESHOLD_PX:
+            to_another_row = drag.mode == "body" and self._rows()[self._row_at(y)] != drag.clip.tile
+            if abs(x - drag.press_x) < _DRAG_THRESHOLD_PX and not to_another_row:
                 return
-            drag.moved = True
-            self._timeline.checkpoint()
-        self._apply_drag(drag, x)
-        self._draw()
-        self._on_change()
+        drag.moved = True
+        self._apply_drag(drag, x, y)
 
-    def _apply_drag(self, drag: _Drag, x: float) -> None:
+    def _apply_drag(self, drag: _Drag, x: float, y: float) -> None:
         timeline, clip = self._timeline, drag.clip
         assert clip is not None
         moved_sec = (x - drag.press_x) / self._zoom
-        is_audio = timeline.is_audio(clip)
-        if drag.mode == "out":
-            end = self._snapped(drag.start_sec + (drag.out_sec - drag.in_sec) + moved_sec, moving=clip)
-            timeline.trim(clip, out_sec=clip.in_sec + (end - clip.start_sec))
-        elif drag.mode == "in" and is_audio:
-            start = self._snapped(drag.start_sec + moved_sec, moving=clip)
-            timeline.trim(clip, in_sec=drag.in_sec + (start - drag.start_sec))
-        elif drag.mode == "in":
-            # A video clip's start is pinned by the clip before it, so the drag maps straight to file time.
-            timeline.trim(clip, in_sec=drag.in_sec + moved_sec)
-        elif is_audio:
+        length = clip.end_sec - clip.start_at_sec
+        if drag.mode == "body":
             start = drag.start_sec + moved_sec
             snapped_start = self._snapped(start, moving=clip)
-            snapped_end = self._snapped(start + clip.duration, moving=clip)
+            snapped_end = self._snapped(start + length, moving=clip)
             if snapped_start != start:
                 start = snapped_start
-            elif snapped_end != start + clip.duration:
-                start = snapped_end - clip.duration
-            timeline.slide(clip, start)
+            elif snapped_end != start + length:
+                start = snapped_end - length
+            tile = self._rows()[self._row_at(y)]
+            # A file without a picture cannot sit in a tile, and one without sound is no use on the audio row.
+            if (tile is None and not clip.media.has_audio) or (tile is not None and not clip.media.has_video):
+                tile = clip.tile
+            drag.landing = (tile, max(0.0, start))
+            self._draw()
+            return
+        if drag.mode == "out":
+            end = self._snapped(drag.start_sec + (drag.trim_end_sec - drag.trim_start_sec) + moved_sec, moving=clip)
+            timeline.trim(clip, trim_end_sec=clip.trim_start_sec + (end - clip.start_at_sec))
         else:
-            # The clip goes before the first neighbour whose middle the pointer has not passed.
-            # Judging against the row *without* the dragged clip keeps the result steady under the pointer.
-            pointer_sec, position, index = self._sec_at(x), 0.0, 0
-            for other in timeline.video:
-                if other is clip:
-                    continue
-                if pointer_sec < position + other.duration / 2:
-                    break
-                position += other.duration
-                index += 1
-            timeline.reorder(clip, index)
+            start = self._snapped(drag.start_sec + moved_sec, moving=clip)
+            timeline.trim(clip, trim_start_sec=drag.trim_start_sec + (start - drag.start_sec))
+        self._draw()
+        self._on_change()
 
     def _handle_release(self, event: tk.Event) -> None:
         drag, self._drag = self._drag, None
-        if drag is not None and drag.mode == "body" and not drag.moved:
-            # A plain click on a clip also parks the playhead there, ready for a split.
-            self._scrub(self._canvas.canvasx(event.x))
+        if drag is None or drag.clip is None:
+            return
+        if not drag.moved:
+            if drag.mode == "body":
+                # A plain click on a clip also parks the playhead there, ready for a split.
+                self._scrub(self._canvas.canvasx(event.x))
+            return
+        if drag.landing is not None:
+            self._timeline.place(drag.clip, *drag.landing)
+        self._timeline.checkpoint()
+        self._draw()
+        self._on_change()
 
     def _handle_hover(self, event: tk.Event) -> None:
-        hit = self._hit(self._canvas.canvasx(event.x), event.y)
+        hit = self._hit(self._canvas.canvasx(event.x), self._canvas.canvasy(event.y))
         cursor = "" if hit is None else "sb_h_double_arrow" if hit[1] in ("in", "out") else "hand2"
         self._canvas.configure(cursor=cursor)
 
@@ -354,7 +400,7 @@ class TimelineView(ttk.Frame):
 
     def _scrub(self, x: float) -> None:
         self.playhead = max(0.0, min(self._snapped(self._sec_at(x)), self._timeline.extent))
-        self._draw()
+        self._draw_playhead()
         self._on_change()
 
 

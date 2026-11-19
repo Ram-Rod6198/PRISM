@@ -8,11 +8,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from video_combiner.combiner.project import Tile, grid_tiles
+from video_combiner.project import Tile, grid_tiles
 
 _FILE_NAME = "canvas_presets.user.json"
 # Presets shipped with the source tree, merged in as if the user had saved them.
-_SEED_FILE = Path(__file__).resolve().parents[1] / "assets" / _FILE_NAME
+_SEED_FILE = Path(__file__).resolve().parent / "assets" / _FILE_NAME
 
 
 @dataclass
@@ -101,6 +101,7 @@ def _builtin_presets() -> list[CanvasPreset]:
         CanvasPreset("2x2 1080p", 1920, 1080, grid_tiles(1920, 1080), builtin=True),
         CanvasPreset("2x2 720p", 1280, 720, grid_tiles(1280, 720), builtin=True),
         CanvasPreset("3 Top + 2 Centered (1080p tiles)", 5760, 2160, three_over_two, builtin=True),
+        CanvasPreset("Single tile 1080p", 1920, 1080, [Tile(0, 0, 1920, 1080, "Tile 1")], builtin=True),
     ]
 
 

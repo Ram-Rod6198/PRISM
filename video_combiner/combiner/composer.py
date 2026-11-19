@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from video_combiner.combiner.project import AUDIO_MIX, AUDIO_NONE, CombinerProject, Slot, TextOverlay, VideoItem
+from video_combiner.combiner.project import CombinerProject
 from video_combiner.ffmpeg import mp4_output_args, time_arg
+from video_combiner.filters import drawtext, fill
+from video_combiner.project import AUDIO_MIX, AUDIO_NONE, Slot, VideoItem
 
 
 def compose(project: CombinerProject) -> list[str]:
@@ -41,9 +43,7 @@ def compose(project: CombinerProject) -> list[str]:
         delay = max(0.0, video.start_at_sec)
         visible = _visible_seconds(video, duration)
         filters.append(
-            f"[{playing[slot.index]}:v]"
-            f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1"
-            f"[{label}_scaled]"
+            f"[{playing[slot.index]}:v]{fill(w, h)}[{label}_scaled]"
         )
         filters.append(
             f"[{label}_scaled]trim=start={time_arg(trim_start)}:duration={time_arg(visible)},"
@@ -65,7 +65,7 @@ def compose(project: CombinerProject) -> list[str]:
     texts = [text for text in project.texts if text.enabled and text.text.strip()]
     for number, text in enumerate(texts, start=1):
         next_canvas = "vout" if number == len(texts) else f"vtxt{number}"
-        filters.append(f"[{canvas}]{_drawtext(text)}[{next_canvas}]")
+        filters.append(f"[{canvas}]{drawtext(text)}[{next_canvas}]")
         canvas = next_canvas
     if not texts:
         filters.append(f"[{canvas}]format=yuv420p[vout]")
@@ -124,22 +124,3 @@ def _append_audio(
     if len(labels) > 1:
         filters.append("".join(f"[{label}]" for label in labels) + f"amix=inputs={len(labels)}:normalize=0[aout]")
     return "aout"
-
-
-def _drawtext(text: TextOverlay) -> str:
-    escaped = text.text
-    # Backslash first, so the escapes added for the other characters are not escaped again.
-    for char in ("\\", ":", "'", "[", "]", "%", ","):
-        escaped = escaped.replace(char, "\\" + char)
-    color = (text.color or "white").replace(":", "\\:")
-    start = max(0.0, text.start_at_sec)
-    if text.duration_sec is None:
-        enable = f":enable='gte(t\\,{time_arg(start)})'" if start > 0 else ""
-    elif text.duration_sec <= 0:
-        enable = ":enable='0'"
-    else:
-        enable = f":enable='between(t\\,{time_arg(start)}\\,{time_arg(start + text.duration_sec)})'"
-    return (
-        f"drawtext=text='{escaped}':x={int(text.x)}:y={int(text.y)}:"
-        f"fontsize={max(1, int(text.size))}:fontcolor={color}{enable}"
-    )
