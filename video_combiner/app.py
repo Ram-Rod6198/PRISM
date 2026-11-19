@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 from tkinter import ttk
 
 from video_combiner.combiner.workspace import CombinerWorkspace
+from video_combiner.editor.workspace import EditorWorkspace
 from video_combiner.export import ExportBar
 
 
-def create_window() -> tk.Tk:
+def create_window(start_in_editor: bool = False) -> tk.Tk:
     """Build the PRISM window, ready for ``mainloop()``."""
     root = tk.Tk()
     root.title("PRISM")
@@ -20,7 +22,12 @@ def create_window() -> tk.Tk:
     export_bar.pack(side="bottom", fill="x", padx=10, pady=(0, 8))
     modes = ttk.Notebook(root)
     modes.pack(fill="both", expand=True)
-    modes.add(CombinerWorkspace(modes, export_bar), text="  Combine (tiles)  ")
+    combiner = CombinerWorkspace(modes, export_bar)
+    editor = EditorWorkspace(modes, export_bar)
+    modes.add(combiner, text="  Combine (tiles)  ")
+    modes.add(editor, text="  Edit (timeline)  ")
+    if start_in_editor:
+        modes.select(editor)
     export_bar.set_status("Add videos to begin.")
 
     menu_bar = tk.Menu(root)
@@ -31,9 +38,10 @@ def create_window() -> tk.Tk:
     return root
 
 
-def main() -> None:
-    """Run PRISM until its window is closed."""
-    create_window().mainloop()
+def main(argv: list[str] | None = None) -> None:
+    """Run PRISM until its window is closed. ``--edit`` opens on the Edit tab."""
+    arguments = sys.argv[1:] if argv is None else argv
+    create_window(start_in_editor="--edit" in arguments).mainloop()
 
 
 if __name__ == "__main__":
