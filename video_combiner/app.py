@@ -15,9 +15,11 @@ def create_window(start_in_editor: bool = False) -> tk.Tk:
     """Build the PRISM window, ready for ``mainloop()``."""
     root = tk.Tk()
     root.title("PRISM")
-    # Leave room for the title bar and the taskbar on screens smaller than the preferred size.
-    width, height = min(1520, root.winfo_screenwidth() - 60), min(900, root.winfo_screenheight() - 120)
-    root.geometry(f"{width}x{height}")
+    # Leave room for the title bar and the taskbar on screens smaller than the preferred size, and say where
+    # the window goes: left to itself, the system may put a window that only just fits partly off screen.
+    room_w, room_h = root.winfo_screenwidth() - 60, root.winfo_screenheight() - 120
+    width, height = min(1520, room_w), min(900, room_h)
+    root.geometry(f"{width}x{height}+{(room_w - width) // 2}+{(room_h - height) // 2}")
     root.minsize(960, 600)
 
     export_bar = ExportBar(root)
