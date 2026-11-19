@@ -15,8 +15,10 @@ def create_window(start_in_editor: bool = False) -> tk.Tk:
     """Build the PRISM window, ready for ``mainloop()``."""
     root = tk.Tk()
     root.title("PRISM")
-    root.geometry("1520x900")
-    root.minsize(1320, 780)
+    # Leave room for the title bar and the taskbar on screens smaller than the preferred size.
+    width, height = min(1520, root.winfo_screenwidth() - 60), min(900, root.winfo_screenheight() - 120)
+    root.geometry(f"{width}x{height}")
+    root.minsize(960, 600)
 
     export_bar = ExportBar(root)
     export_bar.pack(side="bottom", fill="x", padx=10, pady=(0, 8))

@@ -25,7 +25,7 @@ _SPACE_WIDGETS = ("TButton", "TCheckbutton")
 
 
 class EditorWorkspace(TileWorkspace):
-    """The Edit tab: the shared page over a Timeline, with the timeline and its controls along the bottom.
+    """The Edit tab: the shared page over a Timeline, with the timeline and its controls in the lower pane.
 
     Buttons and keys become edits here; the timeline view handles the mouse.
     Whatever changes, ``_refresh`` brings every panel back in step, and stops
@@ -35,15 +35,16 @@ class EditorWorkspace(TileWorkspace):
     _project: Timeline
 
     def __init__(self, master: tk.Misc, export_bar: ExportBar) -> None:
-        # The timeline takes room at the bottom, so the inspector gives some up (it scrolls).
+        # The page is shorter here, so the inspector (which scrolls) leaves the lists a larger share.
         super().__init__(
-            master, export_bar, Timeline(), preview_title="Preview", videos_reorder=False, inspector_height=250
+            master, export_bar, Timeline(), preview_title="Preview", videos_reorder=False, inspector_share=1.2
         )
         self._position = tk.StringVar()
         ttk.Button(self.audio_frame, text="Add Audio", command=self._add_audio).pack(side="right", padx=(0, 8))
 
-        toolbar = ttk.Frame(self.below)
-        toolbar.pack(fill="x", pady=(10, 6))
+        below = self.add_lower_pane()
+        toolbar = ttk.Frame(below)
+        toolbar.pack(fill="x", pady=(8, 6))
         self._buttons: dict[str, ttk.Button] = {}
         for name, command, side, gap in (
             ("Play", self._toggle_play, "left", 0),
@@ -64,8 +65,8 @@ class EditorWorkspace(TileWorkspace):
             toolbar, foreground="#555555", text="Space plays. Drag a clip to move it, its ends to trim."
         ).pack(side="left", padx=(18, 0))
 
-        self._view = TimelineView(self.below, self._project, on_select=self._select_clip, on_change=self._refresh)
-        self._view.pack(fill="x")
+        self._view = TimelineView(below, self._project, on_select=self._select_clip, on_change=self._refresh)
+        self._view.pack(fill="both", expand=True)
         self._player = Player(
             self, show_picture=self._preview.show_playing, on_progress=self._show_progress, on_stop=self._after_playing
         )

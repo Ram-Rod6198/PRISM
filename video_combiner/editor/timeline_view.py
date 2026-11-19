@@ -15,9 +15,9 @@ from video_combiner.timecode import format_duration
 _LEFT_PAD = 10
 _LABEL_W = 76
 _RULER_H = 26
-_ROW_H = 40
 _ROW_GAP = 4
-_MAX_HEIGHT = 250  # Taller timelines scroll, so the preview above keeps its room.
+_MIN_ROW_H, _MAX_ROW_H = 24, 96  # Rows share the view's height within these; more rows than fit scroll.
+_ASKED_HEIGHT = 120  # What the view asks of its container, which may well give it more or less.
 _EDGE_PX = 7  # How close to a clip's end the pointer must be to grab the edge.
 _SNAP_PX = 8
 _DRAG_THRESHOLD_PX = 4
@@ -58,6 +58,9 @@ class TimelineView(ttk.Frame):
     click on a clip (None: on nothing); ``on_change()`` follows every change
     the user made to the playhead or the timeline. Call ``refresh`` after
     changing the timeline or the selection from outside.
+
+    The view uses whatever height it is given: the rows grow and shrink to
+    fill it, and scroll when there are too many to fit.
     """
 
     def __init__(
@@ -74,14 +77,16 @@ class TimelineView(ttk.Frame):
         self.playhead = 0.0
         self._selected: Clip | None = None
         self._zoom = 60.0
+        self._row_h = _MIN_ROW_H
         self._drag: _Drag | None = None
-        self._thumbnails: dict[str, ImageTk.PhotoImage | None] = {}
+        self._thumbnails: dict[str, tuple[int, ImageTk.PhotoImage | None]] = {}  # By file, with the height made for.
 
         self.columnconfigure(1, weight=1)
-        self._labels = tk.Canvas(self, width=_LABEL_W, height=_MAX_HEIGHT, highlightthickness=0, bg="#2a2d33")
+        self.rowconfigure(0, weight=1)
+        self._labels = tk.Canvas(self, width=_LABEL_W, height=_ASKED_HEIGHT, highlightthickness=0, bg="#2a2d33")
         self._labels.grid(row=0, column=0, sticky="ns")
-        self._canvas = tk.Canvas(self, height=_MAX_HEIGHT, highlightthickness=0, bg="#22252a")
-        self._canvas.grid(row=0, column=1, sticky="ew")
+        self._canvas = tk.Canvas(self, height=_ASKED_HEIGHT, highlightthickness=0, bg="#22252a")
+        self._canvas.grid(row=0, column=1, sticky="nsew")
         x_scroll = ttk.Scrollbar(self, orient="horizontal", command=self._canvas.xview)
         x_scroll.grid(row=1, column=1, sticky="ew")
         y_scroll = ttk.Scrollbar(self, orient="vertical", command=self._scroll_rows)
@@ -136,12 +141,17 @@ class TimelineView(ttk.Frame):
         """The track shown in each row, top to bottom: every tile, then the audio track (None)."""
         return [*range(len(self._timeline.tiles)), None]
 
+    def _fit_rows(self) -> None:
+        """Choose the row height at which the rows fill the view."""
+        room = self._canvas.winfo_height() - _RULER_H - _ROW_GAP
+        self._row_h = max(_MIN_ROW_H, min(room // len(self._rows()) - _ROW_GAP, _MAX_ROW_H))
+
     def _row_y(self, row: int) -> int:
-        return _RULER_H + _ROW_GAP + row * (_ROW_H + _ROW_GAP)
+        return _RULER_H + _ROW_GAP + row * (self._row_h + _ROW_GAP)
 
     def _row_at(self, y: float) -> int:
         """The row at canvas y, or the nearest one when y is above or below them all."""
-        row = int((y - _RULER_H - _ROW_GAP / 2) // (_ROW_H + _ROW_GAP))
+        row = int((y - _RULER_H - _ROW_GAP / 2) // (self._row_h + _ROW_GAP))
         return max(0, min(row, len(self._rows()) - 1))
 
     def _content_height(self) -> int:
@@ -166,7 +176,7 @@ class TimelineView(ttk.Frame):
     def _hit(self, x: float, y: float) -> tuple[Clip, str] | None:
         """The clip under canvas point (x, y) and the part grabbed: "in", "out" or "body"."""
         row = self._row_at(y)
-        if not self._row_y(row) <= y <= self._row_y(row) + _ROW_H:
+        if not self._row_y(row) <= y <= self._row_y(row) + self._row_h:
             return None
         for clip in reversed(self._timeline.track(self._rows()[row])):  # Later clips are drawn on top.
             left, right = self._x_of(clip.start_at_sec), self._x_of(clip.end_sec)
@@ -192,17 +202,15 @@ class TimelineView(ttk.Frame):
         canvas, timeline = self._canvas, self._timeline
         canvas.delete("all")
         rows = self._rows()
+        self._fit_rows()
         total_w, content_h = self._total_width(), self._content_height()
-        height = min(content_h, _MAX_HEIGHT)
-        for widget in (canvas, self._labels):
-            widget.configure(height=height)
         canvas.configure(scrollregion=(0, 0, total_w, content_h))
         self._draw_labels(content_h)
 
         for row, track in enumerate(rows):
             y = self._row_y(row)
             fill = "#2a322d" if track is None else "#2b2f36"
-            canvas.create_rectangle(0, y, total_w, y + _ROW_H, fill=fill, outline="")
+            canvas.create_rectangle(0, y, total_w, y + self._row_h, fill=fill, outline="")
         step = next((s for s in _TICK_STEPS if s * self._zoom >= 70), _TICK_STEPS[-1])
         for tick in range(int(self._sec_at(total_w) / step) + 1):
             x = self._x_of(tick * step)
@@ -244,13 +252,13 @@ class TimelineView(ttk.Frame):
         for row, track in enumerate(self._rows()):
             name = "Audio" if track is None else self._timeline.tiles[track].name
             labels.create_text(
-                8, self._row_y(row) + _ROW_H // 2, text=name[:11], anchor="w", fill="#d0d4da", font=_FONT
+                8, self._row_y(row) + self._row_h // 2, text=name[:11], anchor="w", fill="#d0d4da", font=_FONT
             )
 
     def _draw_hint(self, row: int, text: str) -> None:
         self._canvas.create_text(
             self._canvas.canvasx(0) + _LEFT_PAD + 6,
-            self._row_y(row) + _ROW_H // 2,
+            self._row_y(row) + self._row_h // 2,
             text=text,
             anchor="w",
             fill="#7d838c",
@@ -263,7 +271,7 @@ class TimelineView(ttk.Frame):
         fill, accent = _AUDIO_COLORS if on_audio_row else _VIDEO_COLORS
         left = self._x_of(start_sec)
         right = left + (clip.end_sec - clip.start_at_sec) * self._zoom
-        top, bottom = self._row_y(row) + 2, self._row_y(row) + _ROW_H - 2
+        top, bottom = self._row_y(row) + 2, self._row_y(row) + self._row_h - 2
         selected = clip is self._selected and not faded
         canvas.create_rectangle(
             left,
@@ -294,22 +302,24 @@ class TimelineView(ttk.Frame):
             canvas.create_text(
                 text_x, top + 4, text=clip.media.name[:fitting_chars], anchor="nw", fill="white", font=_FONT
             )
-            canvas.create_text(
-                text_x, top + 20, text=length[:fitting_chars], anchor="nw", fill=accent, font=_FONT_SMALL
-            )
+            if bottom - top >= 34:  # Room for a second line.
+                canvas.create_text(
+                    text_x, top + 20, text=length[:fitting_chars], anchor="nw", fill=accent, font=_FONT_SMALL
+                )
 
     def _thumbnail(self, thumb_path: str | None) -> ImageTk.PhotoImage | None:
         if thumb_path is None:
             return None
-        if thumb_path not in self._thumbnails:
+        height = self._row_h - 8
+        if self._thumbnails.get(thumb_path, (0, None))[0] != height:
             try:
                 with Image.open(thumb_path) as image:
-                    height = _ROW_H - 8
                     width = max(1, round(image.width * height / image.height))
-                    self._thumbnails[thumb_path] = ImageTk.PhotoImage(image.convert("RGB").resize((width, height)))
+                    picture = ImageTk.PhotoImage(image.convert("RGB").resize((width, height)))
             except OSError:
-                self._thumbnails[thumb_path] = None
-        return self._thumbnails[thumb_path]
+                picture = None
+            self._thumbnails[thumb_path] = (height, picture)
+        return self._thumbnails[thumb_path][1]
 
     # --- mouse ----------------------------------------------------------------
 

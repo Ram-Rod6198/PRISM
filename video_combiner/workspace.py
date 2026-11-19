@@ -10,7 +10,7 @@ from video_combiner.export import ExportBar
 from video_combiner.inspector import Inspector
 from video_combiner.preview import PreviewPane
 from video_combiner.project import AUDIO_MIX, AUDIO_NONE, Selection, Slot, TextOverlay, TileProject
-from video_combiner.widgets import LayerListPanel, ScrollableFrame
+from video_combiner.widgets import LayerListPanel, ScrollableFrame, SplitPanes
 
 
 class TileWorkspace(ttk.Frame):
@@ -20,8 +20,9 @@ class TileWorkspace(ttk.Frame):
     project; the panels do the editing. A mode passes its project and fills in
     what differs: which video is in which tile (``_slots``), how videos are
     listed and added (``_video_labels``, ``_add_videos``) and how the result is
-    rendered (``_render``). Anything a mode has on top goes into ``below``, a
-    frame across the bottom of the tab, or into ``audio_frame``.
+    rendered (``_render``). Anything a mode has on top goes into
+    ``add_lower_pane()`` or into ``audio_frame``. The user can drag the bars
+    between the panels to resize them.
     """
 
     def __init__(
@@ -31,20 +32,21 @@ class TileWorkspace(ttk.Frame):
         project: TileProject,
         preview_title: str = "Static Preview",
         videos_reorder: bool = True,
-        inspector_height: int = 360,
+        inspector_share: float = 1.6,
     ) -> None:
         super().__init__(master, padding=10)
         self._export_bar = export_bar
         self._project = project
         self._selection: Selection = None
 
-        self.below = ttk.Frame(self)
-        self.below.pack(side="bottom", fill="x")
-        panes = ttk.Panedwindow(self, orient="horizontal")
-        panes.pack(fill="both", expand=True)
-        left, right = ttk.Frame(panes), ttk.Frame(panes)
-        panes.add(left, weight=3)
-        panes.add(right, weight=2)
+        self._stack = SplitPanes(self, orient="vertical")
+        self._stack.pack(fill="both", expand=True)
+        panes = SplitPanes(self._stack, orient="horizontal")
+        self._stack.add_pane(panes, share=7, min_size=200)
+        left, right = ttk.Frame(panes, padding=(0, 0, 6, 0)), ttk.Frame(panes, padding=(6, 0, 0, 0))
+        # The preview's side gets the larger share of the tab, across and down.
+        panes.add_pane(left, share=3, min_size=240)
+        panes.add_pane(right, share=2, min_size=240)
 
         self._preview = PreviewPane(
             left, project, slots=self._slots, on_select=self._select, on_move=self._refresh, title=preview_title
@@ -54,14 +56,16 @@ class TileWorkspace(ttk.Frame):
         self._preview.pack(fill="both", expand=True)
 
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=1)
-        inspector_area = ScrollableFrame(right, height=inspector_height)
-        inspector_area.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        right.rowconfigure(0, weight=1)
+        side = SplitPanes(right, orient="vertical")
+        side.grid(row=0, column=0, sticky="nsew")
+        inspector_area = ScrollableFrame(side)
+        side.add_pane(inspector_area, share=inspector_share)
         self._inspector = Inspector(inspector_area.body, project, on_change=self._after_edit)
         self._inspector.grid(row=0, column=0, sticky="nsew")
 
-        lists = ttk.Frame(right)
-        lists.grid(row=1, column=0, sticky="nsew")
+        lists = ttk.Frame(side, padding=(0, 6, 0, 0))
+        side.add_pane(lists, share=1, min_size=110)
         lists.columnconfigure(0, weight=1)
         lists.columnconfigure(1, weight=1)
         lists.rowconfigure(0, weight=1)
@@ -102,14 +106,23 @@ class TileWorkspace(ttk.Frame):
         self._lists["text"].grid(row=0, column=1, sticky="nsew", padx=(4, 0))
 
         self.audio_frame = ttk.LabelFrame(right, text="Audio")
-        self.audio_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.audio_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         self._audio_choice = ttk.Combobox(self.audio_frame, state="readonly")
         self._audio_choice.pack(side="left", fill="x", expand=True, padx=8, pady=8)
         self._audio_choice.bind("<<ComboboxSelected>>", self._handle_audio_choice)
 
         self._render_button = ttk.Button(right, text="Render MP4", command=self._render)
-        self._render_button.grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self._render_button.grid(row=2, column=0, sticky="w", pady=(8, 0))
         export_bar.when_busy_changes(self._enable_render_button)
+
+    def add_lower_pane(self) -> ttk.Frame:
+        """A frame across the bottom of the tab, below the page, for a mode to fill.
+
+        It takes the smaller share of the tab's height; the user changes that by dragging the bar above it.
+        """
+        pane = ttk.Frame(self._stack)
+        self._stack.add_pane(pane, share=3, min_size=90)
+        return pane
 
     # --- what a mode fills in ---------------------------------------------------
 

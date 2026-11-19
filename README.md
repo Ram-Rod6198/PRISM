@@ -22,6 +22,7 @@ Built for users who need a simple visual workflow without opening a full video e
 - **Audio from another video** - **Add Audio** puts any video's or audio file's sound on the audio row; or drag a clip down there to keep only its sound
 - **Split and remove** - cut a clip at the playhead (`S`) and delete the part you don't want (`Del`)
 - **Undo / redo** - every edit, `Ctrl+Z` / `Ctrl+Y`
+- **Resizable** - the window opens no larger than the screen; every panel resizes with it, the preview keeping the largest share. Drag the bars between the preview, the side panel, the lists and the timeline to change the split (both tabs)
 
 ### Combine mode (tiles)
 
@@ -162,7 +163,7 @@ PRISM/
     speaker.py                   # Plays a sound file through the speakers
     media_picker.py              # "Choose files" dialog that returns only usable media
     timecode.py                  # Parsing and formatting of times
-    widgets.py                   # Shared Tk widgets (layer list, scroll area, UI-thread calls)
+    widgets.py                   # Shared Tk widgets (resizable panes, layer list, scroll area, UI-thread calls)
     combiner/                    # Combine mode: the n-th video plays in the n-th tile
       project.py                 # CombinerProject
       composer.py                # project -> FFmpeg arguments

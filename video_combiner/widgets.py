@@ -66,14 +66,15 @@ class LayerListPanel(ttk.LabelFrame):
         self._on_select = on_select
         self._on_edit = on_edit
 
-        # The buttons are packed first, so a short panel shrinks the list rather than hiding them.
+        # The buttons are packed first, so a short panel shrinks the list rather than hiding them,
+        # and kept narrow, so all of them fit in a narrow panel.
         buttons = ttk.Frame(self)
         buttons.pack(side="bottom", fill="x", padx=6, pady=(6, 6))
         ttk.Button(buttons, text=add_label, command=on_add).pack(side="left")
-        ttk.Button(buttons, text="Remove", command=self._remove).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="Remove", width=7, command=self._remove).pack(side="left", padx=(6, 0))
         if reorder:
-            ttk.Button(buttons, text="Down", command=lambda: self._shift(+1)).pack(side="right")
-            ttk.Button(buttons, text="Up", command=lambda: self._shift(-1)).pack(side="right", padx=(0, 6))
+            ttk.Button(buttons, text="Down", width=5, command=lambda: self._shift(+1)).pack(side="right")
+            ttk.Button(buttons, text="Up", width=3, command=lambda: self._shift(-1)).pack(side="right", padx=(0, 6))
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
@@ -118,11 +119,64 @@ class LayerListPanel(ttk.LabelFrame):
         self._on_edit(index + step)
 
 
-class ScrollableFrame(ttk.Frame):
-    """A fixed-height area whose content scrolls vertically. Put children in ``body``."""
+class SplitPanes(tk.PanedWindow):
+    """Panes in a row or a stack, with a bar between neighbours that the user drags to resize them.
 
-    def __init__(self, master: tk.Misc, height: int) -> None:
-        super().__init__(master, height=height)
+    Every pane has a share of the room. Resizing the window resizes all panes
+    by their shares, so the one given the largest share stays the largest;
+    dragging a bar changes the shares of the two panes beside it.
+
+    Create each pane's widget with this as its master, then hand it to ``add_pane``.
+    """
+
+    def __init__(self, master: tk.Misc, orient: str) -> None:
+        # The classic widget, because it draws its dividers the same on every platform.
+        super().__init__(
+            master, orient=orient, sashwidth=6, sashrelief="flat", borderwidth=0, background="#aeb4bd"
+        )
+        self._size_option = "width" if orient == "horizontal" else "height"
+        self._panes: list[tk.Widget] = []
+        self._shares: list[float] = []
+        self._laid_out_for = 0
+        self.bind("<Configure>", self._share_out)
+        self.bind("<ButtonRelease-1>", self._adopt_dragged_sizes, add="+")
+
+    def add_pane(self, widget: tk.Widget, share: float = 1.0, min_size: int = 60) -> None:
+        """Append ``widget`` with ``share`` parts of the room (relative to the other panes' shares)."""
+        self._panes.append(widget)
+        self._shares.append(share)
+        self.add(widget, stretch="always", minsize=min_size)
+        self._laid_out_for = 0
+
+    def _room(self) -> int:
+        """The pixels the panes have between them along the split."""
+        length = self.winfo_width() if self._size_option == "width" else self.winfo_height()
+        return length - int(self.cget("sashwidth")) * (len(self._panes) - 1)
+
+    def _share_out(self, _event: object = None) -> None:
+        room = self._room()
+        if room == self._laid_out_for or room <= 0:
+            return
+        self._laid_out_for = room
+        total = sum(self._shares)
+        for pane, share in zip(self._panes, self._shares):
+            # An explicit size also stops Tk from resizing the pane whenever its content asks for a new size.
+            self.paneconfigure(pane, **{self._size_option: max(1, round(room * share / total))})
+
+    def _adopt_dragged_sizes(self, _event: object) -> None:
+        self.update_idletasks()
+        sizes = [pane.winfo_width() if self._size_option == "width" else pane.winfo_height() for pane in self._panes]
+        if sum(sizes) > 0:
+            self._shares = [float(size) for size in sizes]
+            for pane, size in zip(self._panes, sizes):
+                self.paneconfigure(pane, **{self._size_option: max(1, size)})
+
+
+class ScrollableFrame(ttk.Frame):
+    """An area whose content scrolls vertically; it is as tall as its container makes it. Children go in ``body``."""
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master)
         self.grid_propagate(False)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
